@@ -13,8 +13,8 @@ const { MONGO_URI, JWT_SECRET, PORT } = process.env;
 
 // SSL options
 const sslOptions = {
-    key: fs.readFileSync('path/to/private.key'),
-    cert: fs.readFileSync('path/to/certificate.crt')
+    key: fs.readFileSync('/etc/letsencrypt/live/api.milestono.com-0003/privkey.pem'),
+    cert: fs.readFileSync('/etc/letsencrypt/live/api.milestono.com-0003/fullchain.pem')
 };
 
 // Middleware
