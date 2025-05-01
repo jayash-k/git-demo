@@ -5,15 +5,13 @@ const passport = require('passport');
 const bodyParser = require('body-parser');
 const https = require('https');
 const fs = require('fs');
-const path = require('path');
 require('dotenv').config();
 
 const app = express();
 
-// Configuration
 const { MONGO_URI, JWT_SECRET, PORT } = process.env;
 
-// SSL Setup
+// SSL Configuration
 const sslOptions = {
   key: fs.readFileSync('/etc/letsencrypt/live/api.milestono.com-0003/privkey.pem'),
   cert: fs.readFileSync('/etc/letsencrypt/live/api.milestono.com-0003/fullchain.pem')
@@ -31,46 +29,28 @@ app.use(passport.session());
 app.use(bodyParser.urlencoded({ extended: true }));
 app.use(bodyParser.json());
 
-// Model Assurance System
-function ensureModel(modelName, schemaDefinition = {}) {
+// Enhanced Model Loader
+function getModel(modelName) {
   try {
-    require.resolve(`./models/${modelName}`);
-    return require(`./models/${modelName}`);
-  } catch (err) {
-    console.warn(`${modelName} model not found, creating dynamic schema`);
-    return mongoose.model(modelName, new mongoose.Schema(schemaDefinition, { strict: false }));
-  }
-}
-
-// Preload Critical Models
-const models = {
-  VerifiedAgent: ensureModel('VerifiedAgent', {
-    name: String,
-    email: { type: String, unique: true },
-    status: { type: String, default: 'pending' }
-  })
-};
-
-// Route Loader with Graceful Degradation
-function safeRequireRoute(routePath) {
-  try {
-    const routeModule = require(routePath);
-    return typeof routeModule === 'function' ? routeModule : express.Router().use(routeModule);
-  } catch (err) {
-    console.error(`Route load failed: ${routePath}`, err.message);
+    return mongoose.model(modelName);
+  } catch {
+    console.log(`Creating dynamic ${modelName} model`);
+    const schema = new mongoose.Schema({
+      // Basic fields that match your requirements
+      name: { type: String, required: true },
+      email: { type: String, required: true, unique: true },
+      status: { type: String, default: 'unverified' },
+      metadata: { type: mongoose.Schema.Types.Mixed }
+    }, { timestamps: true });
     
-    const router = express.Router();
-    router.all('*', (req, res) => {
-      res.status(503).json({
-        error: 'Service temporarily unavailable',
-        details: `The ${path.basename(routePath, '.js')} feature is currently disabled`
-      });
-    });
-    return router;
+    return mongoose.model(modelName, schema);
   }
 }
 
-// Database Connection with Model Verification
+// Initialize Models
+const VerifiedAgent = getModel('VerifiedAgent');
+
+// Database Connection
 mongoose.connect(MONGO_URI, {
   useNewUrlParser: true,
   useUnifiedTopology: true,
@@ -78,52 +58,38 @@ mongoose.connect(MONGO_URI, {
   socketTimeoutMS: 30000
 })
 .then(() => {
-  console.log('MongoDB connected');
+  console.log('MongoDB connected successfully');
   
-  // Verify models
-  Object.entries(models).forEach(([name, model]) => {
-    console.log(`Model status: ${name} - ${model ? 'available' : 'fallback active'}`);
-  });
+  // Model Verification
+  console.log('VerifiedAgent schema:', Object.keys(VerifiedAgent.schema.paths));
 
-  // Route Setup
-  const apiRouter = express.Router();
+  // Route Configuration
+  const router = express.Router();
   
-  // Core Routes
-  apiRouter.use('/users', safeRequireRoute('./routes/userRoutes'));
-  apiRouter.use('/auth', safeRequireRoute('./routes/authRoutes'));
-  
-  // Feature Routes (with model dependency awareness)
-  apiRouter.use('/verified-agents', (req, res, next) => {
-    if (models.VerifiedAgent.schema.paths.status) {
-      // Proper model exists
-      safeRequireRoute('./routes/verifiedAgentRoutes')(req, res, next);
-    } else {
-      // Fallback mode
-      res.status(501).json({
-        error: 'Feature unavailable',
-        solution: 'VerifiedAgent model implementation required'
-      });
-    }
-  });
-
-  app.use('/api', apiRouter);
-
   // Health Check
-  app.get('/system/health', (req, res) => {
+  router.get('/health', (req, res) => {
     res.json({
-      status: 'operational',
+      status: 'ok',
       database: 'connected',
-      models: Object.keys(models).map(name => ({
-        name,
-        status: models[name].schema.paths.status ? 'complete' : 'fallback'
-      }))
+      models: {
+        VerifiedAgent: {
+          fields: Object.keys(VerifiedAgent.schema.paths),
+          isDynamic: !VerifiedAgent.schema.paths.verifiedAt // Example check
+        }
+      }
     });
   });
 
+  // API Routes
+  app.use('/api', router);
+  app.use('/api/agents', require('./routes/verifiedAgentRoutes'));
+
   // Start Server
   https.createServer(sslOptions, app).listen(PORT, () => {
-    console.log(`Secure server running on port ${PORT}`);
-    console.log('Model status:', Object.keys(models).map(m => `${m}:${models[m].schema.paths.status ? '✓' : '△'}`));
+    console.log(`Server running on https://api.milestono.com:${PORT}`);
+    console.log('Model status:', {
+      VerifiedAgent: VerifiedAgent.schema.paths.status ? 'complete' : 'basic'
+    });
   });
 })
 .catch(err => {
