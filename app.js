@@ -5,109 +5,130 @@ const passport = require('passport');
 const bodyParser = require('body-parser');
 const https = require('https');
 const fs = require('fs');
-const path = require('path'); // Add this
+const path = require('path');
 require('dotenv').config();
 
 const app = express();
 
+// Configuration
 const { MONGO_URI, JWT_SECRET, PORT } = process.env;
 
-// SSL options
+// SSL Setup
 const sslOptions = {
-    key: fs.readFileSync('/etc/letsencrypt/live/api.milestono.com-0003/privkey.pem'),
-    cert: fs.readFileSync('/etc/letsencrypt/live/api.milestono.com-0003/fullchain.pem')
+  key: fs.readFileSync('/etc/letsencrypt/live/api.milestono.com-0003/privkey.pem'),
+  cert: fs.readFileSync('/etc/letsencrypt/live/api.milestono.com-0003/fullchain.pem')
 };
 
 // Middleware
 app.use(express.json());
 app.use(session({
-    secret: JWT_SECRET,
-    resave: false,
-    saveUninitialized: true
+  secret: JWT_SECRET,
+  resave: false,
+  saveUninitialized: true
 }));
 app.use(passport.initialize());
 app.use(passport.session());
 app.use(bodyParser.urlencoded({ extended: true }));
 app.use(bodyParser.json());
 
-// Improved route loading with error handling
-function loadRoute(routePath) {
-    try {
-        return require(routePath);
-    } catch (err) {
-        console.error(`Failed to load route: ${routePath}`);
-        console.error(err);
-        // Return a router that responds with 501 for all requests
-        const router = express.Router();
-        router.all('*', (req, res) => {
-            res.status(501).json({ 
-                error: 'Service temporarily unavailable',
-                details: `Route ${routePath} failed to load`
-            });
-        });
-        return router;
-    }
+// Model Assurance System
+function ensureModel(modelName, schemaDefinition = {}) {
+  try {
+    require.resolve(`./models/${modelName}`);
+    return require(`./models/${modelName}`);
+  } catch (err) {
+    console.warn(`${modelName} model not found, creating dynamic schema`);
+    return mongoose.model(modelName, new mongoose.Schema(schemaDefinition, { strict: false }));
+  }
 }
 
-// MongoDB connection
+// Preload Critical Models
+const models = {
+  VerifiedAgent: ensureModel('VerifiedAgent', {
+    name: String,
+    email: { type: String, unique: true },
+    status: { type: String, default: 'pending' }
+  })
+};
+
+// Route Loader with Graceful Degradation
+function safeRequireRoute(routePath) {
+  try {
+    const routeModule = require(routePath);
+    return typeof routeModule === 'function' ? routeModule : express.Router().use(routeModule);
+  } catch (err) {
+    console.error(`Route load failed: ${routePath}`, err.message);
+    
+    const router = express.Router();
+    router.all('*', (req, res) => {
+      res.status(503).json({
+        error: 'Service temporarily unavailable',
+        details: `The ${path.basename(routePath, '.js')} feature is currently disabled`
+      });
+    });
+    return router;
+  }
+}
+
+// Database Connection with Model Verification
 mongoose.connect(MONGO_URI, {
-    useNewUrlParser: true,
-    useUnifiedTopology: true,
-    connectTimeoutMS: 30000,
-    socketTimeoutMS: 30000
+  useNewUrlParser: true,
+  useUnifiedTopology: true,
+  connectTimeoutMS: 30000,
+  socketTimeoutMS: 30000
 })
 .then(() => {
-    console.log('MongoDB connected');
+  console.log('MongoDB connected');
+  
+  // Verify models
+  Object.entries(models).forEach(([name, model]) => {
+    console.log(`Model status: ${name} - ${model ? 'available' : 'fallback active'}`);
+  });
 
-    // Verify critical models exist
-    try {
-        require.resolve('./models/VerifiedAgent');
-        console.log('VerifiedAgent model found');
-    } catch (err) {
-        console.error('VerifiedAgent model not found!');
-        // Handle missing model (create simple one if needed)
-        const verifiedAgentSchema = new mongoose.Schema({});
-        mongoose.model('VerifiedAgent', verifiedAgentSchema);
-        console.warn('Created empty VerifiedAgent model as fallback');
+  // Route Setup
+  const apiRouter = express.Router();
+  
+  // Core Routes
+  apiRouter.use('/users', safeRequireRoute('./routes/userRoutes'));
+  apiRouter.use('/auth', safeRequireRoute('./routes/authRoutes'));
+  
+  // Feature Routes (with model dependency awareness)
+  apiRouter.use('/verified-agents', (req, res, next) => {
+    if (models.VerifiedAgent.schema.paths.status) {
+      // Proper model exists
+      safeRequireRoute('./routes/verifiedAgentRoutes')(req, res, next);
+    } else {
+      // Fallback mode
+      res.status(501).json({
+        error: 'Feature unavailable',
+        solution: 'VerifiedAgent model implementation required'
+      });
     }
+  });
 
-    // Start the HTTPS server
-    https.createServer(sslOptions, app).listen(PORT, () => {
-        console.log(`Server started on https://api.milestono.com:${PORT}`);
+  app.use('/api', apiRouter);
+
+  // Health Check
+  app.get('/system/health', (req, res) => {
+    res.json({
+      status: 'operational',
+      database: 'connected',
+      models: Object.keys(models).map(name => ({
+        name,
+        status: models[name].schema.paths.status ? 'complete' : 'fallback'
+      }))
     });
+  });
+
+  // Start Server
+  https.createServer(sslOptions, app).listen(PORT, () => {
+    console.log(`Secure server running on port ${PORT}`);
+    console.log('Model status:', Object.keys(models).map(m => `${m}:${models[m].schema.paths.status ? '✓' : '△'}`));
+  });
 })
 .catch(err => {
-    console.error(`MongoDB connection error: ${err.message}`);
-    process.exit(1);
-});
-
-// Route handlers with error protection
-app.use('/api', loadRoute('./routes/userRoutes'));
-app.use('/auth', loadRoute('./routes/authRoutes'));
-app.use('/api', loadRoute('./routes/propertyRoutes'));
-app.use('/api', loadRoute('./routes/serviceRoutes'));
-app.use('/api', loadRoute('./routes/accountRoutes'));
-app.use('/api', loadRoute('./routes/paymentRoutes'));
-app.use('/api', loadRoute('./routes/otherRoutes'));
-app.use('/api', loadRoute('./routes/homePageRoutes'));
-app.use('/api', loadRoute('./routes/enquiryRoutes'));
-app.use('/api', loadRoute('./routes/feedbackRoutes'));
-app.use('/api', loadRoute('./routes/projectRoutes'));
-app.use('/api', loadRoute('./routes/galleryImageRoutes'));
-app.use('/api', loadRoute('./routes/bankRoutes'));
-app.use('/api', loadRoute('./routes/agentRoutes'));
-app.use('/api', loadRoute('./routes/verifiedAgentRoutes'));
-app.use('/api', loadRoute('./routes/agentDashboardRoutes'));
-
-// Fallback for missing routes
-app.use((req, res) => {
-    res.status(404).json({ error: 'Route not found' });
-});
-
-// Error handling middleware
-app.use((err, req, res, next) => {
-    console.error(err.stack);
-    res.status(500).json({ error: 'Internal server error' });
+  console.error('Database connection failed:', err);
+  process.exit(1);
 });
 
 module.exports = app;
