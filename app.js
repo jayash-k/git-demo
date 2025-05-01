@@ -30,68 +30,66 @@ app.use(passport.session());
 app.use(bodyParser.urlencoded({ extended: true }));
 app.use(bodyParser.json());
 
-// 1. Model Definition - Completely self-contained
-const VerifiedAgent = mongoose.model('VerifiedAgent') || mongoose.model('VerifiedAgent', 
-  new mongoose.Schema({
-    name: { type: String, required: true },
-    email: { type: String, required: true, unique: true },
-    status: { type: String, default: 'pending' },
-    verifiedAt: { type: Date },
-    documents: [{ type: String }]
-  }, { timestamps: true })
-);
-
-// 2. Controller Logic - Embedded directly in app.js
-const verifiedAgentController = {
-  create: async (req, res) => {
-    try {
-      const agent = await VerifiedAgent.create(req.body);
-      res.status(201).json(agent);
-    } catch (err) {
-      res.status(400).json({ error: err.message });
-    }
-  },
-  getAll: async (req, res) => {
-    try {
-      const agents = await VerifiedAgent.find();
-      res.json(agents);
-    } catch (err) {
-      res.status(500).json({ error: err.message });
-    }
-  },
-  getById: async (req, res) => {
-    try {
-      const agent = await VerifiedAgent.findById(req.params.id);
-      if (!agent) return res.status(404).json({ error: 'Agent not found' });
-      res.json(agent);
-    } catch (err) {
-      res.status(500).json({ error: err.message });
-    }
-  }
-};
-
-// 3. Route Setup - Self-contained routing
-app.use('/api/verified-agents', express.Router()
-  .post('/', verifiedAgentController.create)
-  .get('/', verifiedAgentController.getAll)
-  .get('/:id', verifiedAgentController.getById)
-);
-
-// Database Connection
+// Database Connection - must happen before model definition
 mongoose.connect(MONGO_URI, {
   useNewUrlParser: true,
   useUnifiedTopology: true,
   connectTimeoutMS: 30000,
   socketTimeoutMS: 30000
-})
-.then(() => {
+}).then(() => {
   console.log('MongoDB connected');
-  
+
+  // 1. Model Definition - Proper schema registration
+  const verifiedAgentSchema = new mongoose.Schema({
+    name: { type: String, required: true },
+    email: { type: String, required: true, unique: true },
+    status: { type: String, default: 'pending' },
+    verifiedAt: { type: Date },
+    documents: [{ type: String }]
+  }, { timestamps: true });
+
+  const VerifiedAgent = mongoose.models.VerifiedAgent || mongoose.model('VerifiedAgent', verifiedAgentSchema);
+
+  // 2. Controller Logic
+  const verifiedAgentController = {
+    create: async (req, res) => {
+      try {
+        const agent = await VerifiedAgent.create(req.body);
+        res.status(201).json(agent);
+      } catch (err) {
+        res.status(400).json({ error: err.message });
+      }
+    },
+    getAll: async (req, res) => {
+      try {
+        const agents = await VerifiedAgent.find();
+        res.json(agents);
+      } catch (err) {
+        res.status(500).json({ error: err.message });
+      }
+    },
+    getById: async (req, res) => {
+      try {
+        const agent = await VerifiedAgent.findById(req.params.id);
+        agent ? res.json(agent) : res.status(404).json({ error: 'Not found' });
+      } catch (err) {
+        res.status(500).json({ error: err.message });
+      }
+    }
+  };
+
+  // 3. Route Setup
+  app.use('/api/verified-agents', express.Router()
+    .post('/', verifiedAgentController.create)
+    .get('/', verifiedAgentController.getAll)
+    .get('/:id', verifiedAgentController.getById)
+  );
+
   // Health Check
   app.get('/health', (req, res) => {
     res.json({
       status: 'ok',
-      models: ['VerifiedAgent'],
+      models: Object.keys(mongoose.models),
       dbStatus: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected'
     });
   });
@@ -99,13 +97,10 @@ mongoose.connect(MONGO_URI, {
   // Start Server
   https.createServer(sslOptions, app).listen(PORT, () => {
     console.log(`Server running on https://api.milestono.com:${PORT}`);
-    console.log('Available routes:');
-    console.log('- POST /api/verified-agents');
-    console.log('- GET /api/verified-agents');
-    console.log('- GET /api/verified-agents/:id');
+    console.log('Available models:', Object.keys(mongoose.models));
   });
-})
-.catch(err => {
+
+}).catch(err => {
   console.error('Database connection failed:', err);
   process.exit(1);
 });
